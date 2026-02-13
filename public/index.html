@@ -1,26 +1,130 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>MiniCord Pro</title>
+    <title>Beluga Chat</title>
+    <meta charset="UTF-8">
+    <script src="/socket.io/socket.io.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial;
+            background: #0f172a;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            background: #1e293b;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        #chat {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        .message { margin-bottom: 8px; }
+
+        .owner { color: gold; font-weight: bold; }
+        .admin { color: #ff4d4d; }
+        .mod { color: #4da6ff; }
+        .user { color: #cccccc; }
+
+        #form {
+            display: flex;
+            padding: 10px;
+            background: #1e293b;
+        }
+
+        #input {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            font-size: 16px;
+        }
+
+        button {
+            padding: 10px;
+            background: #3b82f6;
+            border: none;
+            color: white;
+        }
+    </style>
 </head>
 <body>
 
-<div id="auth">
-  <input id="username" placeholder="Username">
-  <input id="password" type="password" placeholder="Password">
-  <button onclick="register()">Register</button>
-  <button onclick="login()">Login</button>
-</div>
+<header>
+    <div id="roomDisplay">Room: global</div>
+    <div>
+        <input id="roomInput" placeholder="Room name">
+        <button onclick="joinRoom()">Join</button>
+    </div>
+</header>
 
-<div id="app" style="display:none">
-  <div id="channels"></div>
-  <div id="messages"></div>
-  <input id="msg" placeholder="Message">
-  <button onclick="send()">Send</button>
-</div>
+<div id="chat"></div>
 
-<script src="/socket.io/socket.io.js"></script>
-<script src="app.js"></script>
+<form id="form">
+    <input id="input" autocomplete="off" placeholder="Type message..." />
+    <button>Send</button>
+</form>
+
+<script>
+    const socket = io();
+
+    let username = prompt("Enter username:");
+    socket.emit("set username", username);
+
+    const chat = document.getElementById("chat");
+    const input = document.getElementById("input");
+    const form = document.getElementById("form");
+    const roomDisplay = document.getElementById("roomDisplay");
+
+    form.addEventListener("submit", function(e) {
+        e.preventDefault();
+        if (input.value) {
+            socket.emit("chat message", input.value);
+            input.value = "";
+        }
+    });
+
+    socket.on("chat message", function(data) {
+
+        const div = document.createElement("div");
+        div.classList.add("message");
+
+        if (data.startsWith("[OWNER]")) div.classList.add("owner");
+        else if (data.startsWith("[ADMIN]")) div.classList.add("admin");
+        else if (data.startsWith("[MOD]")) div.classList.add("mod");
+        else if (data.startsWith("[USER]")) div.classList.add("user");
+
+        div.textContent = data;
+
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+    });
+
+    socket.on("clear chat", function() {
+        chat.innerHTML = "";
+    });
+
+    socket.on("room joined", function(room) {
+        roomDisplay.textContent = "Room: " + room;
+        chat.innerHTML = "";
+    });
+
+    function joinRoom() {
+        const roomName = document.getElementById("roomInput").value;
+        if (roomName) {
+            socket.emit("join room", roomName);
+        }
+    }
+</script>
 
 </body>
 </html>

@@ -1,160 +1,183 @@
-require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const cors = require("cors");
-const User = require("./models/User");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server);
 
-app.use(express.json());
-app.use(cors());
-app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, "public")));
 
-/* ---------------- DATABASE ---------------- */
+let users = {};
 
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB Connected"))
-  .catch(err => console.error(err));
-
-/* ---------------- AUTH ROUTES ---------------- */
-
-app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
-
-  try {
-    const hash = await bcrypt.hash(password, 10);
-    await User.create({ username, password: hash });
-    res.json({ message: "Registered successfully" });
-  } catch {
-    res.status(400).json({ error: "Username already exists" });
-  }
-});
-
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-
-  const user = await User.findOne({ username });
-  if (!user) return res.status(400).json({ error: "Invalid credentials" });
-
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(400).json({ error: "Invalid credentials" });
-
-  if (user.banned) return res.status(403).json({ error: "You are banned" });
-
-  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
-    expiresIn: "7d"
-  });
-
-  res.json({ token, role: user.role });
-});
-
-/* ---------------- CHAT SYSTEM ---------------- */
-
-let channels = {
-  general: [],
-  gaming: [],
-  coding: []
+const rolePower = {
+    owner: 4,
+    admin: 3,
+    mod: 2,
+    user: 1
 };
 
-let onlineUsers = {};
+io.on("connection", (socket) => {
 
-// Socket auth middleware
-io.use(async (socket, next) => {
-  try {
-    const token = socket.handshake.auth.token;
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    socket.user = await User.findById(decoded.id);
+    console.log("New connection:", socket.id);
 
-    if (!socket.user || socket.user.banned)
-      return next(new Error("Unauthorized"));
+    socket.on("set username", (username) => {
 
-    next();
-  } catch {
-    next(new Error("Unauthorized"));
-  }
-});
+        let role = username === "Beluga" ? "owner" : "user";
 
-io.on("connection", socket => {
-  const user = socket.user;
+        users[socket.id] = {
+            name: username,
+            role: role
+        };
 
-  onlineUsers[socket.id] = user.username;
+        socket.join("global");
+        socket.currentRoom = "global";
 
-  socket.emit("channels", Object.keys(channels));
-  io.emit("users", Object.values(onlineUsers));
+        socket.emit("room joined", "global");
 
-  socket.on("joinChannel", channel => {
-    if (!channels[channel]) return;
-    socket.join(channel);
-  });
+        io.to("global").emit(
+            "chat message",
+            `[SYSTEM] ${username} joined as ${role.toUpperCase()}`
+        );
 
-  socket.on("message", ({ channel, text }) => {
-    if (!channels[channel]) return;
-    if (!text.trim()) return;
-
-    const msg = { user: user.username, text };
-    channels[channel].push(msg);
-
-    io.to(channel).emit("message", {
-      channel,
-      user: user.username,
-      text
+        console.log(username + " joined as " + role);
     });
-  });
 
-  socket.on("kick", async username => {
-    if (user.role !== "admin" && user.role !== "mod") return;
+    socket.on("join room", (room) => {
 
-    const target = Object.entries(onlineUsers)
-      .find(([id, name]) => name === username);
+        socket.leave(socket.currentRoom);
+        socket.join(room);
+        socket.currentRoom = room;
 
-    if (target) {
-      io.sockets.sockets.get(target[0])?.disconnect();
-    }
-  });
+        socket.emit("room joined", room);
 
-  socket.on("ban", async username => {
-    if (user.role !== "admin") return;
+        console.log(users[socket.id]?.name + " joined room " + room);
+    });
 
-    await User.updateOne({ username }, { banned: true });
+    socket.on("chat message", (msg) => {
 
-    const target = Object.entries(onlineUsers)
-      .find(([id, name]) => name === username);
+        const user = users[socket.id];
+        if (!user) return;
 
-    if (target) {
-      io.sockets.sockets.get(target[0])?.disconnect();
-    }
-  });
+        const room = socket.currentRoom || "global";
 
-  socket.on("disconnect", () => {
-    delete onlineUsers[socket.id];
-    io.emit("users", Object.values(onlineUsers));
-  });
+        // ---------------- COMMANDS ----------------
+        if (msg.startsWith("$")) {
+
+            const parts = msg.split(" ");
+            const command = parts[0];
+
+            // MAKE ROLE
+            if (command === "$make" && parts.length >= 3) {
+
+                const newRole = parts[1];
+                const targetName = parts[2].replace("@", "");
+
+                if (!rolePower[newRole]) return;
+
+                if (rolePower[user.role] <= rolePower[newRole]) {
+                    socket.emit("chat message", "[SYSTEM] Cannot assign equal/higher role");
+                    return;
+                }
+
+                for (let id in users) {
+                    if (users[id].name === targetName) {
+                        users[id].role = newRole;
+                        io.to(room).emit(
+                            "chat message",
+                            `[SYSTEM] ${targetName} is now ${newRole.toUpperCase()}`
+                        );
+                        console.log(targetName + " promoted to " + newRole);
+                        return;
+                    }
+                }
+            }
+
+            // KICK
+            if (command === "$kick" && parts.length >= 2) {
+
+                const targetName = parts[1].replace("@", "");
+
+                for (let id in users) {
+                    if (users[id].name === targetName) {
+
+                        if (rolePower[user.role] <= rolePower[users[id].role]) {
+                            socket.emit("chat message", "[SYSTEM] Cannot kick equal/higher role");
+                            return;
+                        }
+
+                        io.to(id).emit("chat message", "[SYSTEM] You were kicked");
+                        io.sockets.sockets.get(id)?.disconnect();
+
+                        console.log(targetName + " was kicked");
+                        return;
+                    }
+                }
+            }
+
+            // CLEAR
+            if (command === "$clear") {
+
+                if (rolePower[user.role] >= rolePower.admin) {
+                    io.to(room).emit("clear chat");
+                    console.log("Chat cleared in room " + room);
+                } else {
+                    socket.emit("chat message", "[SYSTEM] Only admin+ can clear");
+                }
+
+                return;
+            }
+
+            // TRANSFER OWNER
+            if (command === "$transfer" && parts.length >= 2) {
+
+                if (user.role !== "owner") {
+                    socket.emit("chat message", "[SYSTEM] Only owner can transfer");
+                    return;
+                }
+
+                const targetName = parts[1].replace("@", "");
+
+                for (let id in users) {
+                    if (users[id].name === targetName) {
+
+                        users[id].role = "owner";
+                        user.role = "admin";
+
+                        io.to(room).emit(
+                            "chat message",
+                            `[SYSTEM] Ownership transferred to ${targetName}`
+                        );
+
+                        console.log("Ownership transferred to " + targetName);
+                        return;
+                    }
+                }
+            }
+
+            return;
+        }
+
+        // ---------------- NORMAL MESSAGE ----------------
+
+        const formatted = `[${user.role.toUpperCase()}] ${user.name}: ${msg}`;
+
+        io.to(room).emit("chat message", formatted);
+
+        console.log("LOG:", formatted);
+    });
+
+    socket.on("disconnect", () => {
+
+        if (users[socket.id]) {
+            console.log(users[socket.id].name + " disconnected");
+            delete users[socket.id];
+        }
+    });
+
 });
 
-/* ---------------- BOT ---------------- */
-
-function botMessage(channel, text) {
-  io.to(channel).emit("message", {
-    channel,
-    user: "MiniBot",
-    text
-  });
-}
-
-setInterval(() => {
-  botMessage("general", "Stay disciplined. Build daily.");
-}, 60000);
-
-/* ---------------- START SERVER ---------------- */
-
-const PORT = process.env.PORT || 3000;
-
-server.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+server.listen(4000, () => {
+    console.log("Server running on port 4000");
 });
